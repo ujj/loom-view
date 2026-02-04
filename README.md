@@ -1,6 +1,6 @@
 # Loom View
 
-LoomView is a powerful, grid-based visualization plugin for historical research, world-building, and project tracking. Unlike linear timelines, LoomView uses a "Warp and Weft" approach—mapping time across the X-axis and geographic regions (or custom categories) across parallel horizontal lanes.
+Loom View is a powerful, grid-based visualization plugin for historical research, world-building, and project tracking. Unlike linear timelines, Loom View uses a "Warp and Weft" approach—mapping time across the X-axis and geographic regions (or custom categories) across parallel horizontal lanes.
 
 ✨ Key Features
 
@@ -16,7 +16,7 @@ LoomView is a powerful, grid-based visualization plugin for historical research,
 🚀 Getting Started
 
 1.  **The Metadata Schema**
-    LoomView reads your Markdown frontmatter. For a note to appear on the Loom, it typically needs:
+    Loom View reads your Markdown frontmatter. For a note to appear on the Loom, it typically needs:
 
     ```yaml
     type: history-note
@@ -28,15 +28,15 @@ LoomView is a powerful, grid-based visualization plugin for historical research,
     ```
 
 2.  **Configure the Settings**
-    Go to Settings -> LoomView to map your custom vault structure:
+    Go to Settings -> Loom View to map your custom vault structure:
 
-    *   **Property Mapping:** Tell LoomView which keys you use for dates and lanes (e.g., if you use start-date instead of year-start).
+    *   **Property Mapping:** Tell Loom View which keys you use for dates and lanes (e.g., if you use start-date instead of year-start).
     *   **Lane Order:** Define the vertical order of your regions (e.g., Americas, Europe, South-Asia).
-    *   **Data Scope:** Select the folders or tags LoomView should "weave" into the view.
+    *   **Data Scope:** Select the folders or tags Loom View should "weave" into the view.
 
 🛠 Usage
 
-Click the Loom icon in the ribbon or use the Command Palette: LoomView: Open Timeline.
+Click the Loom icon in the ribbon or use the Command Palette: Loom View: Open Timeline.
 
 *   **Zoom:** Use the top buttons to switch between granularities (1y, 10y, 100y).
 *   **Navigate:** Use Shift + Scroll to move through time or use the Era-Snap buttons at the bottom to jump to specific periods.
