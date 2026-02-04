@@ -190,7 +190,7 @@
         const cache = app.metadataCache.getFileCache(file);
         const frontmatter = cache?.frontmatter;
 
-        if (frontmatter && frontmatter.Type && typeof frontmatter.Type === 'string' && frontmatter.Type.trim().toLowerCase() === 'history-note') {
+        if (frontmatter) {
           // Parse dates using dual-track parser
           const startDateValue = frontmatter[settings.startDateKey];
           const endDateValue = frontmatter[settings.endDateKey] ?? startDateValue;
