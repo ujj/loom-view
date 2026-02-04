@@ -1,0 +1,29 @@
+# Dependencies
+node_modules/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs and debug
+*.log
+npm-debug.log*
+
+# Editor / IDE (optional; remove if you want to share settings)
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Env (if you add any)
+.env
+.env.local
+
+# Obsidian-specific
+.obsidian/
+.hotreload
+main.js
+styles.css
+data.json
+
+# Project-specific
