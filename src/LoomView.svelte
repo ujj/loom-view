@@ -61,6 +61,7 @@
   let hasScrolledInitial = false;
   let threadLines: { from: { x: number; y: number }; to: { x: number; y: number }[] } | null = null;
   let innerGridEl: HTMLElement;
+  let isFictionalCalendar = false; // Track if we're using fictional dates (non-numeric strings)
   
   // Lane filter state
   let visibleLanes: Set<string> = new Set();
@@ -237,6 +238,15 @@
       
       console.log(`LoomView.svelte: Processed ${historyNotes.length} history notes.`);
 
+      // Detect if we're using fictional calendar by checking if any note has non-numeric date strings
+      isFictionalCalendar = files.some(file => {
+        const cache = app.metadataCache.getFileCache(file);
+        const frontmatter = cache?.frontmatter;
+        if (!frontmatter) return false;
+        const startVal = frontmatter[settings.startDateKey];
+        return startVal && typeof startVal === 'string' && !/^-?\d+$/.test(startVal.trim());
+      });
+
       notes = historyNotes;
       
       // Dynamic lane discovery and sorting
@@ -306,17 +316,23 @@
       return { coordinate: num, display };
     }
 
-    // TRACK B: String with text - extract first integer, keep raw display
-    const match = str.match(/-?\d+/);
-    if (!match) return null;
+    // TRACK B: String with text - extract last integer, keep raw display
+    // This handles formats like "Era 1: 450" (use 450) or "Year 2024" (use 2024)
+    const matches = str.match(/-?\d+/g);
+    if (!matches || matches.length === 0) return null;
 
     return {
-      coordinate: parseInt(match[0], 10),
+      coordinate: parseInt(matches[matches.length - 1], 10), // Use LAST integer
       display: str, // Show raw string as-is in UI
     };
   }
 
   function formatYearLabel(year: number): string {
+    // For fictional calendars, just show the coordinate number
+    if (isFictionalCalendar) {
+      return String(year);
+    }
+    // For historical dates, use BCE/CE formatting
     if (year < 0) return `${Math.abs(year)} BCE`;
     return `${year} CE`;
   }
@@ -383,8 +399,14 @@
     // Initialize from saved settings or show all lanes
     if (settings.visibleLanes && settings.visibleLanes.length > 0) {
       const filtered = settings.visibleLanes.filter(lane => lanes.indexOf(lane) !== -1);
-      visibleLanes = new Set(filtered);
-      lastSavedLanes = filtered;
+      // If none of the saved lanes exist in current view, show all lanes instead
+      if (filtered.length > 0) {
+        visibleLanes = new Set(filtered);
+        lastSavedLanes = filtered;
+      } else {
+        visibleLanes = new Set(lanes);
+        lastSavedLanes = [...lanes];
+      }
     } else {
       visibleLanes = new Set(lanes);
       lastSavedLanes = [...lanes];
