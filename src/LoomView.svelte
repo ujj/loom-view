@@ -40,7 +40,7 @@
     display: string;
   }
 
-  interface HistoryNote {
+  interface LoomNote {
     path: string;
     fileName: string;
     title: string;
@@ -53,14 +53,13 @@
     noteStyle: 'thematic' | 'event';
   }
 
-  let notes: HistoryNote[] = [];
+  let notes: LoomNote[] = [];
   let lanes: string[] = [];
   let yearRange = { min: 0, max: 0 };
   let hoveredConnectionValues: string[] = [];
   let hoveredNotePath: string | null = null; /* source note for Entity Glow / Thread */
   let hasScrolledInitial = false;
   let threadLines: { from: { x: number; y: number }; to: { x: number; y: number }[] } | null = null;
-  let innerGridEl: HTMLElement;
   let isFictionalCalendar = false; // Track if we're using fictional dates (non-numeric strings)
   
   // Lane filter state
@@ -72,19 +71,20 @@
     return region.toLowerCase().replace(/\s+/g, '-');
   }
 
-  /** Neon glow colors per region (Entity Glow). */
-  const regionGlowColors: Record<string, string> = {
-    'americas': '#c9a227',
-    'europe': '#4a9c7c',
-    'africa': '#b8860b',
-    'asia': '#6b8e23',
-    'south-asia': '#cd853f',
-    'east-asia': '#4a7c9e',
-  };
+  /** Generate consistent color from lane name using hash function. */
+  function getLaneColor(laneSlug: string): string {
+    // Simple hash function to generate consistent colors
+    let hash = 0;
+    for (let i = 0; i < laneSlug.length; i++) {
+      hash = laneSlug.charCodeAt(i) + ((hash << 5) - hash);
+    }
+    // Generate HSL color with fixed saturation and lightness for good visibility
+    const hue = Math.abs(hash) % 360;
+    return `hsl(${hue}, 60%, 50%)`;
+  }
 
 
   onMount(async () => {
-    console.log('LoomView.svelte: onMount');
 
     // Helper function to check if a path matches a folder pattern (supports wildcards)
     function matchesFolder(filePath: string, pattern: string): boolean {
@@ -120,9 +120,7 @@
     }
 
     const processNotes = () => {
-      console.log('LoomView.svelte: Metadata cache resolved. Processing notes...');
       const allFiles = app.vault.getMarkdownFiles();
-      console.log(`LoomView.svelte: Found ${allFiles.length} markdown files.`);
       
       // Parse scope settings
       const sourceFolders = settings.sourceFolders.split(',').map(s => s.trim()).filter(Boolean);
@@ -171,18 +169,11 @@
         }
       });
 
-      console.log(`LoomView.svelte: After filtering, ${files.length} files match scope criteria.`);
-      console.log('Filtering details:', { 
-        sourceFolders, 
-        requiredTags, 
-        scopeOperator,
-        totalFiles: allFiles.length,
-        filteredFiles: files.length 
-      });
 
-      const historyNotes: HistoryNote[] = [];
+      const loomNotes: LoomNote[] = [];
       let minYear = Infinity;
       let maxYear = -Infinity;
+      let detectedFictionalCalendar = false;
 
       // Parse connection keys from settings
       const connKeys = settings.connectionKeys.split(',').map(s => s.trim()).filter(Boolean);
@@ -195,6 +186,11 @@
           // Parse dates using dual-track parser
           const startDateValue = frontmatter[settings.startDateKey];
           const endDateValue = frontmatter[settings.endDateKey] ?? startDateValue;
+          
+          // Detect fictional calendar during main loop (check first valid date)
+          if (!detectedFictionalCalendar && startDateValue && typeof startDateValue === 'string') {
+            detectedFictionalCalendar = !/^-?\d+$/.test(startDateValue.trim());
+          }
           
           const parsedStart = parseDateValue(startDateValue);
           const parsedEnd = parseDateValue(endDateValue);
@@ -219,7 +215,7 @@
               connectionValues.set(key, cleaned);
             }
 
-            const note: HistoryNote = {
+            const note: LoomNote = {
               path: file.path,
               fileName: file.basename,
               title: frontmatter.title || file.basename,
@@ -231,33 +227,20 @@
               connectionValues: connectionValues,
               noteStyle: frontmatter['note-style'] || 'event',
             };
-            historyNotes.push(note);
+            loomNotes.push(note);
           }
         }
       }
       
-      console.log(`LoomView.svelte: Processed ${historyNotes.length} history notes.`);
-
-      // Detect if we're using fictional calendar by checking if any note has non-numeric date strings
-      isFictionalCalendar = files.some(file => {
-        const cache = app.metadataCache.getFileCache(file);
-        const frontmatter = cache?.frontmatter;
-        if (!frontmatter) return false;
-        const startVal = frontmatter[settings.startDateKey];
-        return startVal && typeof startVal === 'string' && !/^-?\d+$/.test(startVal.trim());
-      });
-
-      notes = historyNotes;
+      isFictionalCalendar = detectedFictionalCalendar;
+      notes = loomNotes;
       
-      // Dynamic lane discovery and sorting
-      const allLaneValues: string[] = [];
+      // Dynamic lane discovery and sorting using Set for O(1) lookups
+      const allLaneValuesSet = new Set<string>();
       notes.forEach(n => {
-        n.lanes.forEach(l => {
-          if (allLaneValues.indexOf(l) === -1) {
-            allLaneValues.push(l);
-          }
-        });
+        n.lanes.forEach(l => allLaneValuesSet.add(l));
       });
+      const allLaneValues = Array.from(allLaneValuesSet);
       const userOrder = settings.laneOrder.split(',').map(s => s.trim()).filter(Boolean);
       
       // Sort: user-ordered first, then alphabetical for discovered ones
@@ -269,8 +252,9 @@
       
       // Add "Others" lane if enabled and there are notes with lanes not in userOrder
       if (settings.showUncategorized) {
+        const userOrderSet = new Set(userOrder);
         const hasUncategorized = notes.some(n => 
-          n.lanes.length > 0 && n.lanes.some(l => userOrder.indexOf(l) === -1)
+          n.lanes.length > 0 && n.lanes.some(l => !userOrderSet.has(l))
         );
         if (hasUncategorized || notes.some(n => n.lanes.length === 0)) {
           finalLanes.push('Others');
@@ -280,7 +264,6 @@
       lanes = finalLanes;
       
       yearRange = { min: minYear, max: maxYear };
-      console.log('LoomView.svelte: Data processing complete.', { notes, lanes, yearRange });
 
     };
 
@@ -338,7 +321,7 @@
   }
 
   /** Compute 0-based time column range for a note (for interval packing). */
-  function getNoteColumnRange(note: HistoryNote): { startCol: number; endCol: number } {
+  function getNoteColumnRange(note: LoomNote): { startCol: number; endCol: number } {
     const resValue = resolution;
     const start = Math.floor(note.yearStart / resValue);
     const end = Math.floor(note.yearEnd / resValue);
@@ -356,13 +339,13 @@
 
   /** Assign subLane (0,1,2,...) per note so overlapping notes in the same region get different lanes. */
   function assignSubLanes(
-    regionNotes: { note: HistoryNote; startCol: number; endCol: number }[]
-  ): { note: HistoryNote; startCol: number; endCol: number; subLane: number }[] {
+    regionNotes: { note: LoomNote; startCol: number; endCol: number }[]
+  ): { note: LoomNote; startCol: number; endCol: number; subLane: number }[] {
     const sorted = [...regionNotes].sort(
       (a, b) => a.startCol !== b.startCol ? a.startCol - b.startCol : a.endCol - b.endCol
     );
     const lanes: { startCol: number; endCol: number }[] = [];
-    const result: { note: HistoryNote; startCol: number; endCol: number; subLane: number }[] = [];
+    const result: { note: LoomNote; startCol: number; endCol: number; subLane: number }[] = [];
     for (const { note, startCol, endCol } of sorted) {
       let laneIndex = 0;
       while (laneIndex < lanes.length) {
@@ -385,7 +368,7 @@
   }
 
   interface NotePlacement {
-    note: HistoryNote;
+    note: LoomNote;
     startCol: number;
     endCol: number;
     regionIndex: number;
@@ -425,6 +408,10 @@
 
   $: filteredLanes = lanes.filter(lane => visibleLanes.has(lane));
 
+  // Memoize userOrderArray to avoid parsing on every placements recalculation
+  $: userOrderArray = settings.laneOrder.split(',').map(s => s.trim()).filter(Boolean);
+  $: userOrderSet = new Set(userOrderArray);
+
   $: placements = (() => {
     const res = resolution; /* force Svelte to re-run when resolution changes (getNoteColumnRange uses it) */
     const list: NotePlacement[] = [];
@@ -437,8 +424,7 @@
         .filter((n) => {
           if (lane === 'Others') {
             // "Others" lane: notes with lanes not in userOrder, or no lanes
-            const userOrder = settings.laneOrder.split(',').map(s => s.trim()).filter(Boolean);
-            return n.lanes.length === 0 || n.lanes.some(l => userOrder.indexOf(l) === -1);
+            return n.lanes.length === 0 || n.lanes.some(l => !userOrderSet.has(l));
           } else {
             // Regular lane: notes with this lane value
             return n.lanes.indexOf(lane) !== -1;
@@ -477,26 +463,6 @@
 
   $: totalContentRows = placements.regionLaneCounts.reduce((a, b) => a + b, 0) || 1;
 
-  /** Debug: log placement state when resolution or data changes (remove after debugging). */
-  $: if (typeof window !== 'undefined' && notes.length > 0) {
-    const resValue = resolution;
-    const minCol = Math.floor(yearRange.min / resValue);
-    const maxCol = Math.ceil(yearRange.max / resValue);
-    console.log('[LoomView] render: resolution=', resolution, 'yearRange=', yearRange, 'timelineSpan=', timelineSpan, 'cols 0-based:', minCol, '..', maxCol);
-    if (resolution === 100) {
-      console.log('[LoomView] Century view active: timelineSpan=', timelineSpan, 'totalContentRows=', totalContentRows);
-    }
-    console.log('[LoomView] totalPlacements=', placements.placements.length, 'regionLaneCounts=', placements.regionLaneCounts, 'regionStartRow=', regionStartRow, 'totalContentRows=', totalContentRows);
-    placements.placements.slice(0, 15).forEach((p, i) => {
-      const yearStart = p.note.yearStart;
-      const yearEnd = p.note.yearEnd;
-      console.log(`[LoomView] placement ${i}: "${p.note.title}" lane=${filteredLanes[p.regionIndex]} row=${regionStartRow[p.regionIndex] + p.subLane} col=${p.startCol + 2}-${p.endCol + 3} years=${yearStart}-${yearEnd} (startCol=${p.startCol} endCol=${p.endCol} subLane=${p.subLane})`);
-    });
-    if (placements.placements.length > 15) {
-      console.log('[LoomView] ... and', placements.placements.length - 15, 'more placements');
-    }
-  }
-
   /** One-time scroll when view opens with data (avoids reactive loop). */
   $: if (mainContentEl && notes.length > 0 && !hasScrolledInitial) {
     hasScrolledInitial = true;
@@ -506,36 +472,32 @@
     });
   }
 
+  // Memoize sorted years to avoid sorting on every scroll call
+  $: sortedYears = notes.length > 0 ? notes.map((n) => n.yearStart).sort((a, b) => a - b) : [];
+
   /** Scroll Decade/Year view to 80th percentile of note years. */
   function scrollToDecadeOrYear(): void {
-    if (notes.length === 0 || !mainContentEl) return;
-    const sortedYears = notes.map((n) => n.yearStart).sort((a, b) => a - b);
+    if (notes.length === 0 || !mainContentEl || sortedYears.length === 0) return;
     const targetYear = sortedYears[Math.min(Math.floor(sortedYears.length * 0.8), sortedYears.length - 1)];
     const resValue = resolution;
     const min = Math.floor(yearRange.min / resValue);
     const targetColumn = Math.floor(targetYear / resValue) - min;
-    const columnWidth = 80;
-    const targetScrollLeft = targetColumn * columnWidth;
+    const targetScrollLeft = targetColumn * columnMinWidthPx;
     tick().then(() => {
       if (mainContentEl) {
-        const centered = targetScrollLeft - mainContentEl.clientWidth / 2 + columnWidth / 2;
+        const centered = targetScrollLeft - mainContentEl.clientWidth / 2 + columnMinWidthPx / 2;
         mainContentEl.scrollLeft = centered > 0 ? centered : 0;
       }
     });
   }
 
-  /** Century view only: scroll to the end of the timeline so modern era (1900–2100) is visible. Called after Century grid has re-mounted. */
+  /** Century view only: scroll to the end of the timeline. Called after Century grid has re-mounted. */
   function scrollToCenturyEnd(): void {
-    console.log('[LoomView] scrollToCenturyEnd called, mainContentEl=', !!mainContentEl);
     if (!mainContentEl) return;
     tick().then(() => {
       if (mainContentEl) {
         const maxScroll = mainContentEl.scrollWidth - mainContentEl.clientWidth;
-        console.log('[LoomView] scrollToCenturyEnd: scrollWidth=', mainContentEl.scrollWidth, 'clientWidth=', mainContentEl.clientWidth, 'setting scrollLeft=', maxScroll);
         mainContentEl.scrollLeft = maxScroll;
-        console.log('[LoomView] scrollToCenturyEnd: after set, scrollLeft=', mainContentEl.scrollLeft);
-      } else {
-        console.log('[LoomView] scrollToCenturyEnd: mainContentEl null in tick callback');
       }
     });
   }
@@ -555,7 +517,7 @@
     app.workspace.openLinkText(path, '/', false);
   }
 
-  function getConnectionValues(note: HistoryNote): string[] {
+  function getConnectionValues(note: LoomNote): string[] {
     const allValues: string[] = [];
     for (const values of note.connectionValues.values()) {
       allValues.push(...values);
@@ -563,9 +525,8 @@
     return allValues;
   }
 
-  function handleMouseOver(note: HistoryNote, sourcePath: string) {
+  function handleMouseOver(note: LoomNote, sourcePath: string) {
     const connectionValues = getConnectionValues(note);
-    console.log('[LoomView] hover', { sourcePath, connectionValues });
     hoveredConnectionValues = connectionValues;
     hoveredNotePath = sourcePath;
   }
@@ -576,28 +537,51 @@
     threadLines = null;
   }
 
+  // Pre-build connection values map for efficient lookup
+  $: connectionValuesMap = (() => {
+    const map = new Map<string, string[]>();
+    notes.forEach(note => {
+      map.set(note.path, getConnectionValues(note));
+    });
+    return map;
+  })();
+
+  // Build element map when placements change
+  let elementMap: Map<string, HTMLElement> = new Map();
+  $: if (placements.placements.length > 0 && mainContentEl) {
+    tick().then(() => {
+      requestAnimationFrame(() => {
+        if (!mainContentEl) return;
+        const wrappers = mainContentEl.querySelectorAll('[data-note-path]');
+        elementMap = new Map();
+        wrappers.forEach((w) => {
+          const path = (w as HTMLElement).getAttribute('data-note-path');
+          if (path) elementMap.set(path, w as HTMLElement);
+        });
+      });
+    });
+  }
+
   /** Update thread lines from hovered note to highlighted contemporaries (Entity Glow bonus). */
   /** Use data (notes + hoveredConnectionValues) to decide which notes are highlighted; find DOM by data-note-path so we don't rely on .highlight class timing. */
   $: if (hoveredConnectionValues.length > 0 && hoveredNotePath && mainContentEl) {
     const currentHoveredPath = hoveredNotePath;
-    const highlightedPaths = notes.filter((n) => {
-      const noteValues = getConnectionValues(n);
-      return noteValues.some(v => hoveredConnectionValues.indexOf(v) !== -1);
-    }).map((n) => n.path);
+    const hoveredSet = new Set(hoveredConnectionValues);
+    const highlightedPaths = notes
+      .filter((n) => {
+        const noteValues = connectionValuesMap.get(n.path) || [];
+        return noteValues.some(v => hoveredSet.has(v));
+      })
+      .map((n) => n.path);
     const otherPaths = highlightedPaths.filter((p) => p !== currentHoveredPath);
     tick().then(() => {
       requestAnimationFrame(() => {
-        if (!mainContentEl || !currentHoveredPath) return;
-        const wrappers = mainContentEl.querySelectorAll('[data-note-path]');
-        const getEl = (path: string) => {
-          let found: HTMLElement | null = null;
-          wrappers.forEach((w) => {
-            if ((w as HTMLElement).getAttribute('data-note-path') === path) found = w as HTMLElement;
-          });
-          return found;
-        };
-        const sourceEl = getEl(currentHoveredPath);
-        if (!sourceEl || otherPaths.length === 0) {
+        if (!mainContentEl || !currentHoveredPath || otherPaths.length === 0) {
+          threadLines = null;
+          return;
+        }
+        const sourceEl = elementMap.get(currentHoveredPath);
+        if (!sourceEl) {
           threadLines = null;
           return;
         }
@@ -612,7 +596,7 @@
         const from = getCenter(sourceEl);
         const to: { x: number; y: number }[] = [];
         otherPaths.forEach((path) => {
-          const el = getEl(path);
+          const el = elementMap.get(path);
           if (el) to.push(getCenter(el));
         });
         threadLines = to.length > 0 ? { from, to } : null;
@@ -648,19 +632,14 @@
         }
       }
     }
-    return bookmarks.length > 0 ? bookmarks : [
-      { label: 'Bronze', year: -3000 },
-      { label: 'Iron', year: -1200 },
-      { label: 'Classical', year: -500 },
-      { label: 'Discovery', year: 1400 },
-      { label: 'Modern', year: 1900 },
-    ];
+    return bookmarks;
   })();
   
-  function isHighlighted(note: HistoryNote): boolean {
+  function isHighlighted(note: LoomNote): boolean {
     if (hoveredConnectionValues.length === 0) return false;
-    const noteValues = getConnectionValues(note);
-    return noteValues.some(v => hoveredConnectionValues.indexOf(v) !== -1);
+    const noteValues = connectionValuesMap.get(note.path) || [];
+    const hoveredSet = new Set(hoveredConnectionValues);
+    return noteValues.some(v => hoveredSet.has(v));
   }
   
   $: columnMinWidthPx = resolution >= 100 ? 140 : 80; /* wider columns in Century+ so note titles are readable */
@@ -714,7 +693,6 @@
     {#key resolution}
       <div
         class="loom-inner-grid"
-        bind:this={innerGridEl}
         style="grid-template-columns: 150px repeat({timelineSpan}, minmax({columnMinWidthPx}px, 1fr)); grid-template-rows: auto repeat({totalContentRows}, minmax(60px, 1fr));"
       >
         <div class="timeline-corner" style="grid-column: 1; grid-row: 1;">
@@ -722,9 +700,7 @@
             <button 
               class="filter-btn" 
               on:click={() => {
-                console.log('[LoomView] Filter button clicked, current state:', showLaneFilter);
                 showLaneFilter = !showLaneFilter;
-                console.log('[LoomView] Filter button new state:', showLaneFilter);
               }}
               title="Filter lanes"
             >
@@ -774,7 +750,7 @@
               <button
                 class="note-block {p.note.noteStyle} region-{getRegionSlug(filteredLanes[p.regionIndex])}"
                 class:highlight={isHighlighted(p.note)}
-                style={isHighlighted(p.note) ? `--glow-color: ${regionGlowColors[getRegionSlug(filteredLanes[p.regionIndex])] ?? 'var(--text-accent)'}` : ''}
+                style={isHighlighted(p.note) ? `--glow-color: ${getLaneColor(getRegionSlug(filteredLanes[p.regionIndex]))}` : ''}
                 on:click={() => handleNoteClick(p.note.path)}
                 on:mouseenter={() => handleMouseOver(p.note, p.note.path)}
                 on:mouseleave={handleMouseOut}
@@ -874,9 +850,9 @@
     font-size: 0.85em;
     color: var(--text-muted);
     padding: 5px 10px;
-    background-color: var(--background-primary-alt);
-    border-radius: 4px;
-    border: 1px solid var(--background-modifier-border);
+    cursor: default;
+    user-select: none;
+    opacity: 0.8;
   }
 
   .loom-controls button {
