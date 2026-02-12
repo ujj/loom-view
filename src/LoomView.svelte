@@ -2,6 +2,7 @@
   import { onMount, tick } from 'svelte';
   import type { App, TFile } from 'obsidian';
   import type { LoomViewSettings } from './main';
+  import { parse, parseISO, isValid, format, differenceInCalendarDays, addDays, differenceInWeeks, differenceInMonths, eachWeekOfInterval, eachMonthOfInterval, startOfMonth, startOfWeek, endOfWeek, startOfDay } from 'date-fns';
 
   export let app: App;
   export let settings: LoomViewSettings;
@@ -53,14 +54,32 @@
     noteStyle: 'thematic' | 'event';
   }
 
+  interface LoomDateNote {
+    path: string;
+    fileName: string;
+    title: string;
+    lanes: string[];
+    dateStart: Date;
+    dateEnd: Date;
+    connectionValues: Map<string, string[]>;
+    noteStyle: 'thematic' | 'event';
+  }
+
   let notes: LoomNote[] = [];
+  let dateNotes: LoomDateNote[] = [];
   let lanes: string[] = [];
   let yearRange = { min: 0, max: 0 };
+  let dateRange = { min: new Date(), max: new Date() };
   let hoveredConnectionValues: string[] = [];
   let hoveredNotePath: string | null = null; /* source note for Entity Glow / Thread */
   let hasScrolledInitial = false;
   let threadLines: { from: { x: number; y: number }; to: { x: number; y: number }[] } | null = null;
   let isFictionalCalendar = false; // Track if we're using fictional dates (non-numeric strings)
+  let viewMode: 'years' | 'dates' = 'years';
+  
+  // --- Date Mode State ---
+  type DateResolution = 'Month' | 'Week' | 'Day';
+  let dateResolution: DateResolution = 'Month';
   
   // Lane filter state
   let visibleLanes: Set<string> = new Set();
@@ -119,6 +138,34 @@
       }
     }
 
+    /**
+     * Takes an array of notes (year or date based) and returns a sorted list of lanes.
+     */
+    function discoverLanes(notes: (LoomNote | LoomDateNote)[]): string[] {
+      const allLaneValuesSet = new Set<string>();
+      notes.forEach(n => {
+        n.lanes.forEach(l => allLaneValuesSet.add(l));
+      });
+      const allLaneValues = Array.from(allLaneValuesSet);
+      const userOrder = settings.laneOrder.split(',').map(s => s.trim()).filter(Boolean);
+      
+      const orderedLanes = userOrder.filter(l => allLaneValues.indexOf(l) !== -1);
+      const unorderedLanes = allLaneValues.filter(l => userOrder.indexOf(l) === -1).sort();
+      
+      let finalLanes: string[] = [...orderedLanes, ...unorderedLanes];
+      
+      if (settings.showUncategorized) {
+        const userOrderSet = new Set(userOrder);
+        const hasUncategorized = notes.some(n => 
+          n.lanes.length > 0 && n.lanes.some(l => !userOrderSet.has(l))
+        );
+        if (hasUncategorized || notes.some(n => n.lanes.length === 0)) {
+          finalLanes.push('Others');
+        }
+      }
+      return finalLanes;
+    }
+
     const processNotes = () => {
       const allFiles = app.vault.getMarkdownFiles();
       
@@ -165,106 +212,160 @@
           if (sourceFolders.length > 0 && requiredTags.length > 0) {
             return folderMatch || tagMatch;
           }
+          // If only one filter type is present, it's an AND (or effectively, just that filter)
           return folderMatch && tagMatch;
         }
       });
 
 
-      const loomNotes: LoomNote[] = [];
-      let minYear = Infinity;
-      let maxYear = -Infinity;
-      let detectedFictionalCalendar = false;
-
-      // Parse connection keys from settings
-      const connKeys = settings.connectionKeys.split(',').map(s => s.trim()).filter(Boolean);
-
-      for (const file of files) {
+      // --- View Mode Auto-Detection ---
+      // Find the first file with a date to determine the mode
+      const firstFileWithDate = files.find(file => {
         const cache = app.metadataCache.getFileCache(file);
-        const frontmatter = cache?.frontmatter;
-
-        if (frontmatter) {
-          // Parse dates using dual-track parser
-          const startDateValue = frontmatter[settings.startDateKey];
-          const endDateValue = frontmatter[settings.endDateKey] ?? startDateValue;
-          
-          // Detect fictional calendar during main loop (check first valid date)
-          if (!detectedFictionalCalendar && startDateValue && typeof startDateValue === 'string') {
-            detectedFictionalCalendar = !/^-?\d+$/.test(startDateValue.trim());
-          }
-          
-          const parsedStart = parseDateValue(startDateValue);
-          const parsedEnd = parseDateValue(endDateValue);
-
-          if (parsedStart && parsedEnd) {
-            minYear = Math.min(minYear, parsedStart.coordinate);
-            maxYear = Math.max(maxYear, parsedEnd.coordinate);
-
-            // Get lane values from configured key
-            const laneValue = frontmatter[settings.laneKey];
-            const laneArray: string[] = Array.isArray(laneValue) 
-              ? laneValue.map(String)
-              : (laneValue ? [String(laneValue)] : []);
-
-            // Build connection values map from all configured keys
-            const connectionValues = new Map<string, string[]>();
-            for (const key of connKeys) {
-              const val = frontmatter[key];
-              const cleaned = Array.isArray(val) 
-                ? val.map(cleanFigure)
-                : (val ? [cleanFigure(String(val))] : []);
-              connectionValues.set(key, cleaned);
-            }
-
-            const note: LoomNote = {
-              path: file.path,
-              fileName: file.basename,
-              title: frontmatter.title || file.basename,
-              lanes: laneArray,
-              yearStart: parsedStart.coordinate,
-              yearEnd: parsedEnd.coordinate,
-              yearStartDisplay: parsedStart.display,
-              yearEndDisplay: parsedEnd.display,
-              connectionValues: connectionValues,
-              noteStyle: frontmatter['note-style'] || 'event',
-            };
-            loomNotes.push(note);
-          }
-        }
-      }
-      
-      isFictionalCalendar = detectedFictionalCalendar;
-      notes = loomNotes;
-      
-      // Dynamic lane discovery and sorting using Set for O(1) lookups
-      const allLaneValuesSet = new Set<string>();
-      notes.forEach(n => {
-        n.lanes.forEach(l => allLaneValuesSet.add(l));
+        return cache?.frontmatter && cache.frontmatter[settings.startDateKey];
       });
-      const allLaneValues = Array.from(allLaneValuesSet);
-      const userOrder = settings.laneOrder.split(',').map(s => s.trim()).filter(Boolean);
-      
-      // Sort: user-ordered first, then alphabetical for discovered ones
-      const orderedLanes = userOrder.filter(l => allLaneValues.indexOf(l) !== -1);
-      const unorderedLanes = allLaneValues.filter(l => userOrder.indexOf(l) === -1).sort();
-      
-      // Build final lane list
-      let finalLanes: string[] = [...orderedLanes, ...unorderedLanes];
-      
-      // Add "Others" lane if enabled and there are notes with lanes not in userOrder
-      if (settings.showUncategorized) {
-        const userOrderSet = new Set(userOrder);
-        const hasUncategorized = notes.some(n => 
-          n.lanes.length > 0 && n.lanes.some(l => !userOrderSet.has(l))
-        );
-        if (hasUncategorized || notes.some(n => n.lanes.length === 0)) {
-          finalLanes.push('Others');
+
+      let detectedViewMode: 'years' | 'dates' = 'years';
+      if (firstFileWithDate) {
+        const firstValue = app.metadataCache.getFileCache(firstFileWithDate)?.frontmatter?.[settings.startDateKey];
+        if (typeof firstValue === 'string') {
+          const trimmed = firstValue.trim();
+          // A value is a date if it is NOT a simple integer, but CAN be parsed as a valid date by our enhanced parser.
+          if (!/^-?\d+$/.test(trimmed) && parseDate(trimmed)) {
+            detectedViewMode = 'dates';
+          }
         }
       }
-      
-      lanes = finalLanes;
-      
-      yearRange = { min: minYear, max: maxYear };
+      viewMode = detectedViewMode;
 
+      if (viewMode === 'years') {
+        const loomNotes: LoomNote[] = [];
+        let minYear = Infinity;
+        let maxYear = -Infinity;
+        let detectedFictionalCalendar = false;
+
+        // Parse connection keys from settings
+        const connKeys = settings.connectionKeys.split(',').map(s => s.trim()).filter(Boolean);
+
+        for (const file of files) {
+          const cache = app.metadataCache.getFileCache(file);
+          const frontmatter = cache?.frontmatter;
+
+          if (frontmatter) {
+            // Parse dates using dual-track parser
+            const startDateValue = frontmatter[settings.startDateKey];
+            const endDateValue = frontmatter[settings.endDateKey] ?? startDateValue;
+            
+            // Detect fictional calendar during main loop (check first valid date)
+            if (!detectedFictionalCalendar && startDateValue && typeof startDateValue === 'string') {
+              detectedFictionalCalendar = !/^-?\d+$/.test(startDateValue.trim());
+            }
+            
+            const parsedStart = parseDateValue(startDateValue);
+            const parsedEnd = parseDateValue(endDateValue);
+
+            if (parsedStart && parsedEnd) {
+              minYear = Math.min(minYear, parsedStart.coordinate);
+              maxYear = Math.max(maxYear, parsedEnd.coordinate);
+
+              // Get lane values from configured key
+              const laneValue = frontmatter[settings.laneKey];
+              const laneArray: string[] = Array.isArray(laneValue) 
+                ? laneValue.map(String)
+                : (laneValue ? [String(laneValue)] : []);
+
+              // Build connection values map from all configured keys
+              const connectionValues = new Map<string, string[]>();
+              for (const key of connKeys) {
+                const val = frontmatter[key];
+                const cleaned = Array.isArray(val) 
+                  ? val.map(cleanFigure)
+                  : (val ? [cleanFigure(String(val))] : []);
+                connectionValues.set(key, cleaned);
+              }
+
+              const note: LoomNote = {
+                path: file.path,
+                fileName: file.basename,
+                title: frontmatter.title || file.basename,
+                lanes: laneArray,
+                yearStart: parsedStart.coordinate,
+                yearEnd: parsedEnd.coordinate,
+                yearStartDisplay: parsedStart.display,
+                yearEndDisplay: parsedEnd.display,
+                connectionValues: connectionValues,
+                noteStyle: frontmatter['note-style'] || 'event',
+              };
+              loomNotes.push(note);
+            }
+          }
+        }
+        
+        isFictionalCalendar = detectedFictionalCalendar;
+        notes = loomNotes;
+        lanes = discoverLanes(notes);
+        yearRange = { min: minYear, max: maxYear };
+      } else {
+        // --- DATES MODE ---
+        const loomDateNotes: LoomDateNote[] = [];
+        let minDate: Date | null = null;
+        let maxDate: Date | null = null;
+
+        const connKeys = settings.connectionKeys.split(',').map(s => s.trim()).filter(Boolean);
+
+        for (const file of files) {
+          const cache = app.metadataCache.getFileCache(file);
+          const frontmatter = cache?.frontmatter;
+
+          if (frontmatter) {
+            const startDateValue = frontmatter[settings.startDateKey];
+            const endDateValue = frontmatter[settings.endDateKey] ?? startDateValue;
+
+            const parsedStart = parseDate(startDateValue);
+            const parsedEnd = parseDate(endDateValue);
+
+            if (parsedStart && parsedEnd) {
+              if (!minDate || parsedStart < minDate) minDate = parsedStart;
+              if (!maxDate || parsedEnd > maxDate) maxDate = parsedEnd;
+
+              const laneValue = frontmatter[settings.laneKey];
+              const laneArray: string[] = Array.isArray(laneValue)
+                ? laneValue.map(String)
+                : (laneValue ? [String(laneValue)] : []);
+
+              const connectionValues = new Map<string, string[]>();
+              for (const key of connKeys) {
+                const val = frontmatter[key];
+                const cleaned = Array.isArray(val)
+                  ? val.map(cleanFigure)
+                  : (val ? [cleanFigure(String(val))] : []);
+                connectionValues.set(key, cleaned);
+              }
+
+              const note: LoomDateNote = {
+                path: file.path,
+                fileName: file.basename,
+                title: frontmatter.title || file.basename,
+                lanes: laneArray,
+                dateStart: parsedStart,
+                dateEnd: parsedEnd,
+                connectionValues: connectionValues,
+                noteStyle: frontmatter['note-style'] || 'event',
+              };
+              loomDateNotes.push(note);
+            }
+          }
+        }
+        
+        dateNotes = loomDateNotes;
+        lanes = discoverLanes(dateNotes);
+        const finalMinDate = minDate ? startOfDay(minDate) : startOfDay(new Date());
+        const finalMaxDate = maxDate ? startOfDay(maxDate) : startOfDay(new Date());
+        dateRange = { min: finalMinDate, max: finalMaxDate };
+        // Clear year-based data
+        notes = [];
+        yearRange = { min: 0, max: 0 };
+      }
     };
 
     // Wait for the metadata cache to be resolved before processing notes
@@ -272,11 +373,47 @@
 
     // Initial run
     processNotes();
+
+    // Deferred re-run: metadata cache may not be fully populated on plugin reload.
+    // Running again after a tick + delay catches late resolution and fixes "all notes at Jan 1" on first load.
+    tick().then(() => {
+      setTimeout(processNotes, 150);
+    });
   });
   
   function cleanFigure(figure: string): string {
     // [[Julius Caesar]] -> Julius Caesar
     return figure.replace(/\[\[|\]\]/g, '').trim();
+  }
+
+  /** Parses a date string or Date into a Date object, using user-defined format or common fallbacks. */
+  function parseDate(value: any): Date | null {
+    if (!value) return null;
+    // Handle Date objects (e.g. from YAML parsing)
+    if (value instanceof Date && isValid(value)) return startOfDay(value);
+    const str = String(value).trim();
+    if (!str) return null;
+
+    let parsedDate: Date;
+
+    // 1. Try user-defined format from settings
+    if (settings.dateFormat && settings.dateFormat !== 'auto') {
+        parsedDate = parse(str, settings.dateFormat, new Date());
+        if (isValid(parsedDate)) return startOfDay(parsedDate);
+    }
+    
+    // 2. Try ISO 8601 (yyyy-MM-dd)
+    parsedDate = parseISO(str);
+    if (isValid(parsedDate)) return startOfDay(parsedDate);
+
+    // 3. Fallback to common formats (dash and slash variants)
+    const formats = ['dd-MM-yyyy', 'MM-dd-yyyy', 'dd/MM/yyyy', 'MM/dd/yyyy'];
+    for (const fmt of formats) {
+      parsedDate = parse(str, fmt, new Date());
+      if (isValid(parsedDate)) return startOfDay(parsedDate);
+    }
+
+    return null;
   }
 
   /** Dual-track date parser: integers auto-format, strings preserve raw display */
@@ -338,14 +475,12 @@
   }
 
   /** Assign subLane (0,1,2,...) per note so overlapping notes in the same region get different lanes. */
-  function assignSubLanes(
-    regionNotes: { note: LoomNote; startCol: number; endCol: number }[]
-  ): { note: LoomNote; startCol: number; endCol: number; subLane: number }[] {
+  function assignSubLanes<T>(regionNotes: { note: T; startCol: number; endCol: number }[]): { note: T; startCol: number; endCol: number; subLane: number }[] {
     const sorted = [...regionNotes].sort(
       (a, b) => a.startCol !== b.startCol ? a.startCol - b.startCol : a.endCol - b.endCol
     );
     const lanes: { startCol: number; endCol: number }[] = [];
-    const result: { note: LoomNote; startCol: number; endCol: number; subLane: number }[] = [];
+    const result: { note: T; startCol: number; endCol: number; subLane: number }[] = [];
     for (const { note, startCol, endCol } of sorted) {
       let laneIndex = 0;
       while (laneIndex < lanes.length) {
@@ -369,6 +504,14 @@
 
   interface NotePlacement {
     note: LoomNote;
+    startCol: number;
+    endCol: number;
+    regionIndex: number;
+    subLane: number;
+  }
+
+  interface DateNotePlacement {
+    note: LoomDateNote;
     startCol: number;
     endCol: number;
     regionIndex: number;
@@ -413,6 +556,7 @@
   $: userOrderSet = new Set(userOrderArray);
 
   $: placements = (() => {
+    if (viewMode !== 'years') return { placements: [], regionLaneCounts: [] };
     const res = resolution; /* force Svelte to re-run when resolution changes (getNoteColumnRange uses it) */
     const list: NotePlacement[] = [];
     const regionLaneCounts: number[] = [];
@@ -463,12 +607,125 @@
 
   $: totalContentRows = placements.regionLaneCounts.reduce((a, b) => a + b, 0) || 1;
 
+  // --- Date Mode Computations ---
+
+  $: datePlacements = (() => {
+    if (viewMode !== 'dates') return { placements: [], regionLaneCounts: [] };
+    const res = dateResolution; /* force re-run when resolution changes */
+    const range = dateRange; /* force re-run when dateRange updates (e.g. after metadata cache resolves) */
+    const list: DateNotePlacement[] = [];
+    const regionLaneCounts: number[] = [];
+
+    for (let filteredIndex = 0; filteredIndex < filteredLanes.length; filteredIndex++) {
+      const lane = filteredLanes[filteredIndex];
+      const laneNotes = dateNotes
+        .filter((n) => {
+          if (lane === 'Others') {
+            return n.lanes.length === 0 || n.lanes.some(l => !userOrderSet.has(l));
+          } else {
+            return n.lanes.indexOf(lane) !== -1;
+          }
+        })
+        .map((n) => {
+          const { startCol, endCol } = getDateNoteColumnRange(n);
+          return { note: n, startCol, endCol };
+        });
+      const withSubLanes = assignSubLanes(laneNotes);
+      const numLanes = laneNotes.length === 0 ? 1 : Math.max(...withSubLanes.map((p) => p.subLane)) + 1;
+      regionLaneCounts.push(numLanes);
+      for (const p of withSubLanes) {
+        list.push({
+          note: p.note,
+          startCol: p.startCol,
+          endCol: p.endCol,
+          regionIndex: filteredIndex,
+          subLane: p.subLane,
+        });
+      }
+    }
+
+    return { placements: list, regionLaneCounts };
+  })();
+
+  $: dateRegionStartRow = (() => {
+    const start: number[] = [];
+    let row = 2; // row 1 = timeline
+    for (let i = 0; i < filteredLanes.length; i++) {
+      start.push(row);
+      row += datePlacements.regionLaneCounts[i] ?? 1;
+    }
+    return start;
+  })();
+
+  $: totalDateContentRows = datePlacements.regionLaneCounts.reduce((a, b) => a + b, 0) || 1;
+
+
+  $: dateTimelineSpan = (() => {
+    if (viewMode !== 'dates' || !dateNotes.length) return 1;
+    if (dateResolution === 'Day') {
+      return differenceInCalendarDays(dateRange.max, dateRange.min) + 1;
+    } else if (dateResolution === 'Week') {
+      const rangeMinStart = startOfWeek(dateRange.min, { weekStartsOn: 1 });
+      const rangeMaxStart = startOfWeek(dateRange.max, { weekStartsOn: 1 });
+      return differenceInWeeks(rangeMaxStart, rangeMinStart) + 1;
+    } else { // Month
+      return differenceInMonths(dateRange.max, dateRange.min) + 1;
+    }
+  })();
+
+  $: dateTimelineLabels = (() => {
+    if (viewMode !== 'dates' || !dateNotes.length) return [];
+    
+    if (dateResolution === 'Day') {
+      const labels: { date: Date, display: string }[] = [];
+      let currentDate = startOfDay(dateRange.min);
+      const rangeMax = startOfDay(dateRange.max);
+      while (currentDate <= rangeMax) {
+        labels.push({ date: currentDate, display: format(currentDate, 'MMM d') });
+        currentDate = addDays(currentDate, 1);
+      }
+      return labels;
+    } else if (dateResolution === 'Week') {
+      const weeks = eachWeekOfInterval({ start: dateRange.min, end: dateRange.max }, { weekStartsOn: 1 });
+      return weeks.map(week => ({ date: week, display: `${format(startOfWeek(week, { weekStartsOn: 1 }), 'MMM d')}-${format(endOfWeek(week, { weekStartsOn: 1 }), 'MMM d')}` }));
+    } else { // Month
+      const months = eachMonthOfInterval({ start: dateRange.min, end: dateRange.max });
+      return months.map(month => ({ date: month, display: format(month, 'MMM yyyy') }));
+    }
+  })();
+
+  function getDateNoteColumnRange(note: LoomDateNote): { startCol: number, endCol: number } {
+    let startCol: number;
+    let endCol: number;
+
+    if (dateResolution === 'Day') {
+      const rangeMin = startOfDay(dateRange.min);
+      startCol = differenceInCalendarDays(startOfDay(note.dateStart), rangeMin);
+      endCol = differenceInCalendarDays(startOfDay(note.dateEnd), rangeMin);
+    } else if (dateResolution === 'Week') {
+      const rangeMinStartOfWeek = startOfWeek(dateRange.min, { weekStartsOn: 1 });
+      startCol = differenceInWeeks(startOfWeek(note.dateStart, { weekStartsOn: 1 }), rangeMinStartOfWeek);
+      endCol = differenceInWeeks(startOfWeek(note.dateEnd, { weekStartsOn: 1 }), rangeMinStartOfWeek);
+    } else { // Month
+      // Ensure dateRange.min is the start of its month for consistent calculation
+      const rangeMinStartOfMonth = startOfMonth(dateRange.min);
+      startCol = differenceInMonths(note.dateStart, rangeMinStartOfMonth);
+      endCol = differenceInMonths(note.dateEnd, rangeMinStartOfMonth);
+    }
+
+    return { startCol, endCol };
+  }
+
+
   /** One-time scroll when view opens with data (avoids reactive loop). */
-  $: if (mainContentEl && notes.length > 0 && !hasScrolledInitial) {
+  $: if (mainContentEl && (notes.length > 0 || dateNotes.length > 0) && !hasScrolledInitial) {
     hasScrolledInitial = true;
     tick().then(() => {
-      if (resolution >= 100) scrollToCenturyEnd();
-      else scrollToDecadeOrYear();
+      if (viewMode === 'years') {
+        if (resolution >= 100) scrollToCenturyEnd();
+        else scrollToDecadeOrYear();
+      }
+      // No initial scroll for date view for now
     });
   }
 
@@ -512,12 +769,23 @@
       grid-row: ${gridRow};
     `;
   }
+
+  function getDateNoteStyle(p: DateNotePlacement): string {
+    const { startCol, endCol, regionIndex, subLane } = p;
+    const gridRow = dateRegionStartRow[regionIndex] + subLane;
+    const gridColumnStart = startCol + 2;
+    const gridColumnEnd = endCol + 3;
+    return `
+      grid-column: ${gridColumnStart} / ${gridColumnEnd};
+      grid-row: ${gridRow};
+    `;
+  }
   
   function handleNoteClick(path: string) {
     app.workspace.openLinkText(path, '/', false);
   }
 
-  function getConnectionValues(note: LoomNote): string[] {
+  function getConnectionValues(note: LoomNote | LoomDateNote): string[] {
     const allValues: string[] = [];
     for (const values of note.connectionValues.values()) {
       allValues.push(...values);
@@ -525,7 +793,7 @@
     return allValues;
   }
 
-  function handleMouseOver(note: LoomNote, sourcePath: string) {
+  function handleMouseOver(note: LoomNote | LoomDateNote, sourcePath: string) {
     const connectionValues = getConnectionValues(note);
     hoveredConnectionValues = connectionValues;
     hoveredNotePath = sourcePath;
@@ -540,7 +808,8 @@
   // Pre-build connection values map for efficient lookup
   $: connectionValuesMap = (() => {
     const map = new Map<string, string[]>();
-    notes.forEach(note => {
+    const notesToProcess = viewMode === 'years' ? notes : dateNotes;
+    notesToProcess.forEach(note => {
       map.set(note.path, getConnectionValues(note));
     });
     return map;
@@ -548,7 +817,7 @@
 
   // Build element map when placements change
   let elementMap: Map<string, HTMLElement> = new Map();
-  $: if (placements.placements.length > 0 && mainContentEl) {
+  $: if ((placements.placements.length > 0 || datePlacements.placements.length > 0) && mainContentEl) {
     tick().then(() => {
       requestAnimationFrame(() => {
         if (!mainContentEl) return;
@@ -567,7 +836,8 @@
   $: if (hoveredConnectionValues.length > 0 && hoveredNotePath && mainContentEl) {
     const currentHoveredPath = hoveredNotePath;
     const hoveredSet = new Set(hoveredConnectionValues);
-    const highlightedPaths = notes
+    const notesToProcess = viewMode === 'years' ? notes : dateNotes;
+    const highlightedPaths = notesToProcess
       .filter((n) => {
         const noteValues = connectionValuesMap.get(n.path) || [];
         return noteValues.some(v => hoveredSet.has(v));
@@ -616,26 +886,53 @@
     mainContentEl.scrollTo({ left: targetX, behavior: 'smooth' });
   }
 
-  // Parse era bookmarks from settings
-  $: eraBookmarks = (() => {
-    const bookmarks: { label: string; year: number }[] = [];
+  /** Era-Snap (date mode): scroll so the given date is visible. */
+  function scrollToDate(targetDate: Date): void {
+    if (!mainContentEl || viewMode !== 'dates') return;
+    let columnIndex: number;
+    if (dateResolution === 'Day') {
+      const rangeMin = startOfDay(dateRange.min);
+      columnIndex = differenceInCalendarDays(startOfDay(targetDate), rangeMin);
+    } else if (dateResolution === 'Week') {
+      const rangeMinStartOfWeek = startOfWeek(dateRange.min, { weekStartsOn: 1 });
+      columnIndex = differenceInWeeks(startOfWeek(targetDate, { weekStartsOn: 1 }), rangeMinStartOfWeek);
+    } else {
+      const rangeMinStartOfMonth = startOfMonth(dateRange.min);
+      columnIndex = differenceInMonths(targetDate, rangeMinStartOfMonth);
+    }
+    const targetX = Math.max(0, columnIndex * columnMinWidthPx);
+    const centered = targetX - mainContentEl.clientWidth / 2 + columnMinWidthPx / 2;
+    mainContentEl.scrollTo({ left: Math.max(0, centered), behavior: 'smooth' });
+  }
+
+  // Parse era bookmarks: supports "Label: Year" (e.g. Bronze: -3000) and "Label: Date" (e.g. Week 1: 2026-01-01)
+  type EraBookmarkYear = { type: 'year'; label: string; year: number };
+  type EraBookmarkDate = { type: 'date'; label: string; date: Date };
+  $: eraBookmarksParsed = (() => {
+    const yearBms: EraBookmarkYear[] = [];
+    const dateBms: EraBookmarkDate[] = [];
     const lines = settings.eraBookmarks.split('\n');
     for (const line of lines) {
       const trimmed = line.trim();
       if (!trimmed) continue;
-      const match = trimmed.match(/^(.+?):\s*(-?\d+)$/);
-      if (match) {
-        const label = match[1].trim();
-        const year = parseInt(match[2], 10);
-        if (!isNaN(year)) {
-          bookmarks.push({ label, year });
-        }
+      const match = trimmed.match(/^(.+?):\s*(.+)$/);
+      if (!match) continue;
+      const label = match[1].trim();
+      const value = match[2].trim();
+      if (/^-?\d+$/.test(value)) {
+        const year = parseInt(value, 10);
+        if (!isNaN(year)) yearBms.push({ type: 'year', label, year });
+      } else {
+        const d = parseDate(value);
+        if (d) dateBms.push({ type: 'date', label, date: d });
       }
     }
-    return bookmarks;
+    return { year: yearBms, date: dateBms };
   })();
+  $: eraBookmarksYear = eraBookmarksParsed.year;
+  $: eraBookmarksDate = eraBookmarksParsed.date;
   
-  function isHighlighted(note: LoomNote): boolean {
+  function isHighlighted(note: LoomNote | LoomDateNote): boolean {
     if (hoveredConnectionValues.length === 0) return false;
     const noteValues = connectionValuesMap.get(note.path) || [];
     const hoveredSet = new Set(hoveredConnectionValues);
@@ -670,121 +967,225 @@
 <div class="loom-view">
   <div class="loom-top-bar">
     <div class="loom-controls">
-      <div class="note-counter">Woven {notes.length} notes</div>
-      {#each zoomLevels as zoomLevel}
-        <button 
-          on:click={() => { 
-            resolution = zoomLevel; 
-            if (zoomLevel >= 100) {
-              tick().then(() => scrollToCenturyEnd());
-            } else {
-              scrollToDecadeOrYear();
-            }
-          }} 
-          class:active={resolution === zoomLevel}
-        >
-          {getZoomLabel(zoomLevel)}
-        </button>
-      {/each}
+      <div class="note-counter">Woven {viewMode === 'years' ? notes.length : dateNotes.length} notes</div>
+      {#if viewMode === 'years'}
+        {#each zoomLevels as zoomLevel}
+          <button 
+            on:click={() => { 
+              resolution = zoomLevel; 
+              if (zoomLevel >= 100) {
+                tick().then(() => scrollToCenturyEnd());
+              } else {
+                scrollToDecadeOrYear();
+              }
+            }} 
+            class:active={resolution === zoomLevel}
+          >
+            {getZoomLabel(zoomLevel)}
+          </button>
+        {/each}
+      {:else}
+        <button on:click={() => dateResolution = 'Month'} class:active={dateResolution === 'Month'}>Month</button>
+        <button on:click={() => dateResolution = 'Week'} class:active={dateResolution === 'Week'}>Week</button>
+        <button on:click={() => dateResolution = 'Day'} class:active={dateResolution === 'Day'}>Day</button>
+      {/if}
     </div>
   </div>
 
-  <div class="loom-main-content" bind:this={mainContentEl}>
-    {#key resolution}
-      <div
-        class="loom-inner-grid"
-        style="grid-template-columns: 150px repeat({timelineSpan}, minmax({columnMinWidthPx}px, 1fr)); grid-template-rows: auto repeat({totalContentRows}, minmax(60px, 1fr));"
-      >
-        <div class="timeline-corner" style="grid-column: 1; grid-row: 1;">
-          <div class="lane-filter-container">
-            <button 
-              class="filter-btn" 
-              on:click={() => {
-                showLaneFilter = !showLaneFilter;
-              }}
-              title="Filter lanes"
-            >
-              Filter
-            </button>
-            {#if showLaneFilter}
-              <div class="lane-filter-dropdown">
-                {#each lanes as lane}
-                  <label class="lane-filter-item">
-                    <input 
-                      type="checkbox" 
-                      checked={visibleLanes.has(lane)} 
-                      on:change={(e) => {
-                        if (e.currentTarget.checked) {
-                          visibleLanes = new Set([...visibleLanes, lane]);
-                        } else {
-                          const newSet = new Set(visibleLanes);
-                          newSet.delete(lane);
-                          visibleLanes = newSet;
-                        }
-                      }}
-                    />
-                    <span>{lane}</span>
-                  </label>
-                {/each}
-              </div>
-            {/if}
-          </div>
-        </div>
-        <div class="timeline-header-row" style="grid-column: 2 / -1; grid-row: 1;">
-          <div class="timeline-header" style="grid-template-columns: repeat({timelineSpan}, minmax({columnMinWidthPx}px, 1fr));">
-            {#each timelineLabels as label}
-              <div class="timeline-label">{label.display}</div>
-            {/each}
-          </div>
-        </div>
-
-        <div class="region-labels">
-          {#each filteredLanes as lane, laneIndex}
-            <div class="region-label" style="grid-column: 1; grid-row: {regionStartRow[laneIndex]} / span {placements.regionLaneCounts[laneIndex]};">{lane}</div>
-          {/each}
-        </div>
-
-        <div class="loom-grid">
-          {#each placements.placements as p}
-            <div class="note-block-wrapper" style={getNoteStyle(p)} data-note-path={p.note.path}>
-              <button
-                class="note-block {p.note.noteStyle} region-{getRegionSlug(filteredLanes[p.regionIndex])}"
-                class:highlight={isHighlighted(p.note)}
-                style={isHighlighted(p.note) ? `--glow-color: ${getLaneColor(getRegionSlug(filteredLanes[p.regionIndex]))}` : ''}
-                on:click={() => handleNoteClick(p.note.path)}
-                on:mouseenter={() => handleMouseOver(p.note, p.note.path)}
-                on:mouseleave={handleMouseOut}
-                on:focus={() => handleMouseOver(p.note, p.note.path)}
-                on:blur={handleMouseOut}
-                title="{p.note.title} ({p.note.yearStartDisplay} to {p.note.yearEndDisplay})"
+  {#if viewMode === 'years'}
+    <div class="loom-main-content" bind:this={mainContentEl}>
+      {#key resolution}
+        <div
+          class="loom-inner-grid"
+          style="grid-template-columns: 150px repeat({timelineSpan}, minmax({columnMinWidthPx}px, 1fr)); grid-template-rows: auto repeat({totalContentRows}, minmax(60px, 1fr));"
+        >
+          <div class="timeline-corner" style="grid-column: 1; grid-row: 1;">
+            <div class="lane-filter-container">
+              <button 
+                class="filter-btn" 
+                on:click={() => {
+                  showLaneFilter = !showLaneFilter;
+                }}
+                title="Filter lanes"
               >
-                <div class="note-title">{p.note.title}</div>
+                Filter
               </button>
+              {#if showLaneFilter}
+                <div class="lane-filter-dropdown">
+                  {#each lanes as lane}
+                    <label class="lane-filter-item">
+                      <input 
+                        type="checkbox" 
+                        checked={visibleLanes.has(lane)} 
+                        on:change={(e) => {
+                          if (e.currentTarget.checked) {
+                            visibleLanes = new Set([...visibleLanes, lane]);
+                          } else {
+                            const newSet = new Set(visibleLanes);
+                            newSet.delete(lane);
+                            visibleLanes = newSet;
+                          }
+                        }}
+                      />
+                      <span>{lane}</span>
+                    </label>
+                  {/each}
+                </div>
+              {/if}
             </div>
-          {/each}
-        </div>
-        {#if threadLines && mainContentEl}
-          <svg class="thread-svg" pointer-events="none" width={mainContentEl.scrollWidth} height={mainContentEl.scrollHeight}>
-            {#each threadLines.to as t}
-              <line x1={threadLines.from.x} y1={threadLines.from.y} x2={t.x} y2={t.y} class="thread-line" stroke="var(--text-accent)" stroke-width="2.5" stroke-opacity="0.9" />
+          </div>
+          <div class="timeline-header-row" style="grid-column: 2 / -1; grid-row: 1;">
+            <div class="timeline-header" style="grid-template-columns: repeat({timelineSpan}, minmax({columnMinWidthPx}px, 1fr));">
+              {#each timelineLabels as label}
+                <div class="timeline-label">{label.display}</div>
+              {/each}
+            </div>
+          </div>
+
+          <div class="region-labels">
+            {#each filteredLanes as lane, laneIndex}
+              <div class="region-label" style="grid-column: 1; grid-row: {regionStartRow[laneIndex]} / span {placements.regionLaneCounts[laneIndex]};">{lane}</div>
             {/each}
-          </svg>
-        {/if}
-      </div>
-    {/key}
-  </div>
+          </div>
+
+          <div class="loom-grid">
+            {#each placements.placements as p}
+              <div class="note-block-wrapper" style={getNoteStyle(p)} data-note-path={p.note.path}>
+                <button
+                  class="note-block {p.note.noteStyle} region-{getRegionSlug(filteredLanes[p.regionIndex])}"
+                  class:highlight={isHighlighted(p.note)}
+                  style={isHighlighted(p.note) ? `--glow-color: ${getLaneColor(getRegionSlug(filteredLanes[p.regionIndex]))}` : ''}
+                  on:click={() => handleNoteClick(p.note.path)}
+                  on:mouseenter={() => handleMouseOver(p.note, p.note.path)}
+                  on:mouseleave={handleMouseOut}
+                  on:focus={() => handleMouseOver(p.note, p.note.path)}
+                  on:blur={handleMouseOut}
+                  title="{p.note.title} ({p.note.yearStartDisplay} to {p.note.yearEndDisplay})"
+                >
+                  <div class="note-title">{p.note.title}</div>
+                </button>
+              </div>
+            {/each}
+          </div>
+          {#if threadLines && mainContentEl}
+            <svg class="thread-svg" pointer-events="none" width={mainContentEl.scrollWidth} height={mainContentEl.scrollHeight}>
+              {#each threadLines.to as t}
+                <line x1={threadLines.from.x} y1={threadLines.from.y} x2={t.x} y2={t.y} class="thread-line" stroke="var(--text-accent)" stroke-width="2.5" stroke-opacity="0.9" />
+              {/each}
+            </svg>
+          {/if}
+        </div>
+      {/key}
+    </div>
+  {:else if viewMode === 'dates'}
+    <div class="loom-main-content" bind:this={mainContentEl}>
+      {#key dateResolution}
+        <div
+          class="loom-inner-grid"
+          style="grid-template-columns: 150px repeat({dateTimelineSpan}, minmax({columnMinWidthPx}px, 1fr)); grid-template-rows: auto repeat({totalDateContentRows}, minmax(60px, 1fr));"
+        >
+          <div class="timeline-corner" style="grid-column: 1; grid-row: 1;">
+            <div class="lane-filter-container">
+              <button 
+                class="filter-btn" 
+                on:click={() => { showLaneFilter = !showLaneFilter; }}
+                title="Filter lanes"
+              >
+                Filter
+              </button>
+              {#if showLaneFilter}
+                <div class="lane-filter-dropdown">
+                  {#each lanes as lane}
+                    <label class="lane-filter-item">
+                      <input 
+                        type="checkbox" 
+                        checked={visibleLanes.has(lane)} 
+                        on:change={(e) => {
+                          if (e.currentTarget.checked) {
+                            visibleLanes = new Set([...visibleLanes, lane]);
+                          } else {
+                            const newSet = new Set(visibleLanes);
+                            newSet.delete(lane);
+                            visibleLanes = newSet;
+                          }
+                        }}
+                      />
+                      <span>{lane}</span>
+                    </label>
+                  {/each}
+                </div>
+              {/if}
+            </div>
+          </div>
+          <div class="timeline-header-row" style="grid-column: 2 / -1; grid-row: 1;">
+            <div class="timeline-header" style="grid-template-columns: repeat({dateTimelineSpan}, minmax({columnMinWidthPx}px, 1fr));">
+              {#each dateTimelineLabels as label}
+                <div class="timeline-label">{label.display}</div>
+              {/each}
+            </div>
+          </div>
+
+          <div class="region-labels">
+            {#each filteredLanes as lane, laneIndex}
+              <div class="region-label" style="grid-column: 1; grid-row: {dateRegionStartRow[laneIndex]} / span {datePlacements.regionLaneCounts[laneIndex]};">{lane}</div>
+            {/each}
+          </div>
+
+          <div class="loom-grid">
+            {#each datePlacements.placements as p}
+              <div class="note-block-wrapper" style={getDateNoteStyle(p)} data-note-path={p.note.path}>
+                <button
+                  class="note-block {p.note.noteStyle} region-{getRegionSlug(filteredLanes[p.regionIndex])}"
+                  class:highlight={isHighlighted(p.note)}
+                  style={isHighlighted(p.note) ? `--glow-color: ${getLaneColor(getRegionSlug(filteredLanes[p.regionIndex]))}` : ''}
+                  on:click={() => handleNoteClick(p.note.path)}
+                  on:mouseenter={() => handleMouseOver(p.note, p.note.path)}
+                  on:mouseleave={handleMouseOut}
+                  on:focus={() => handleMouseOver(p.note, p.note.path)}
+                  on:blur={handleMouseOut}
+                  title="{p.note.title} ({format(p.note.dateStart, settings.dateFormat || 'yyyy-MM-dd')} to {format(p.note.dateEnd, settings.dateFormat || 'yyyy-MM-dd')})"
+                >
+                  <div class="note-title">{p.note.title}</div>
+                </button>
+              </div>
+            {/each}
+          </div>
+          {#if threadLines && mainContentEl}
+            <svg class="thread-svg" pointer-events="none" width={mainContentEl.scrollWidth} height={mainContentEl.scrollHeight}>
+              {#each threadLines.to as t}
+                <line x1={threadLines.from.x} y1={threadLines.from.y} x2={t.x} y2={t.y} class="thread-line" />
+              {/each}
+            </svg>
+          {/if}
+        </div>
+      {/key}
+    </div>
+  {/if}
 
   <div class="era-snap-rail">
-    {#each eraBookmarks as btn}
-      <button
-        type="button"
-        class="era-snap-btn"
-        on:click={() => scrollToYear(btn.year)}
-        title="Scroll to {btn.year < 0 ? Math.abs(btn.year) + ' BCE' : btn.year + ' CE'}"
-      >
-        [{btn.year < 0 ? btn.year : '+' + btn.year}] {btn.label}
-      </button>
-    {/each}
+    {#if viewMode === 'years'}
+      {#each eraBookmarksYear as btn}
+        <button
+          type="button"
+          class="era-snap-btn"
+          on:click={() => scrollToYear(btn.year)}
+          title="Scroll to {btn.year < 0 ? Math.abs(btn.year) + ' BCE' : btn.year + ' CE'}"
+        >
+          [{btn.year < 0 ? btn.year : '+' + btn.year}] {btn.label}
+        </button>
+      {/each}
+    {:else}
+      {#each eraBookmarksDate as btn}
+        <button
+          type="button"
+          class="era-snap-btn"
+          on:click={() => scrollToDate(btn.date)}
+          title="Scroll to {format(btn.date, settings.dateFormat || 'yyyy-MM-dd')}"
+        >
+          [{format(btn.date, settings.dateFormat || 'yyyy-MM-dd')}] {btn.label}
+        </button>
+      {/each}
+    {/if}
   </div>
 </div>
 

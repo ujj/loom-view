@@ -6,6 +6,7 @@ export const LOOM_VIEW_TYPE = 'loom-view';
 export interface LoomViewSettings {
   startDateKey: string;
   endDateKey: string;
+  dateFormat: string;
   laneKey: string;
   laneOrder: string;
   showUncategorized: boolean;
@@ -21,6 +22,7 @@ export interface LoomViewSettings {
 export const DEFAULT_SETTINGS: LoomViewSettings = {
   startDateKey: 'year-start',
   endDateKey: 'year-end',
+  dateFormat: 'yyyy-MM-dd',
   laneKey: 'region',
   laneOrder: 'Americas, Europe, Africa, Asia, South-Asia, East-Asia',
   showUncategorized: true,
@@ -217,6 +219,17 @@ class LoomViewSettingsTab extends PluginSettingTab {
                 }));
 
         new Setting(containerEl)
+            .setName('Date Format')
+            .setDesc('Specify the format for parsing dates (e.g., "yyyy-MM-dd", "MM/dd/yyyy", "dd/MM/yyyy"). Uses date-fns format tokens.')
+            .addText(text => text
+                .setPlaceholder('yyyy-MM-dd')
+                .setValue(this.plugin.settings.dateFormat)
+                .onChange(async (value) => {
+                    this.plugin.settings.dateFormat = value;
+                    await this.plugin.saveSettings();
+                }));
+
+        new Setting(containerEl)
             .setName('Lane Key')
             .setDesc('Frontmatter key used to group notes into lanes (e.g., "region")')
             .addText(text => text
@@ -272,7 +285,7 @@ class LoomViewSettingsTab extends PluginSettingTab {
 
         new Setting(containerEl)
             .setName('Era Bookmarks')
-            .setDesc('Bookmarks for quick navigation. Format: "Label: Year" (one per line). Example: "Bronze: -3000\\nIron: -1200"')
+            .setDesc('Bookmarks for quick navigation (one per line). Year mode: "Label: Year" (e.g. Bronze: -3000). Date mode: "Label: Date" (e.g. Week 1: 2026-01-01). Uses Date Format setting for parsing dates.')
             .addTextArea(text => text
                 .setPlaceholder('Bronze: -3000\nIron: -1200\nClassical: -500')
                 .setValue(this.plugin.settings.eraBookmarks)

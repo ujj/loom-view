@@ -16,6 +16,7 @@
     "@rollup/plugin-node-resolve": "^15.2.3",
     "@rollup/plugin-typescript": "^11.1.6",
     "@tsconfig/svelte": "^5.0.2",
+    "date-fns": "^2.30.0",
     "obsidian": "latest",
     "rollup": "^4.9.6",
     "rollup-plugin-svelte": "^7.1.6",
