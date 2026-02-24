@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
-  import type { App, TFile } from 'obsidian';
+  import type { App } from 'obsidian';
   import type { LoomViewSettings } from './main';
   import { parse, parseISO, isValid, format, differenceInCalendarDays, addDays, differenceInWeeks, differenceInMonths, eachWeekOfInterval, eachMonthOfInterval, startOfMonth, startOfWeek, endOfWeek, startOfDay } from 'date-fns';
 
