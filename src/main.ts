@@ -216,7 +216,7 @@ class LoomViewSettingsTab extends PluginSettingTab {
             .setName('Date format')
             .setDesc('Specify the format for parsing dates (e.g. "yyyy-MM-dd", "MM/dd/yyyy", "dd/MM/yyyy"). Uses date-fns format tokens.')
             .addText(text => text
-                .setPlaceholder('yyyy-MM-dd')
+                .setPlaceholder('Date format, e.g. yyyy-MM-dd')
                 .setValue(this.plugin.settings.dateFormat)
                 .onChange(async (value) => {
                     this.plugin.settings.dateFormat = value;
