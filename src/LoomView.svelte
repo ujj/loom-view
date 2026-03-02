@@ -387,7 +387,7 @@
   }
 
   /** Parses a date string or Date into a Date object, using user-defined format or common fallbacks. */
-  function parseDate(value: any): Date | null {
+  function parseDate(value: unknown): Date | null {
     if (!value) return null;
     // Handle Date objects (e.g. from YAML parsing)
     if (value instanceof Date && isValid(value)) return startOfDay(value);
@@ -1496,5 +1496,10 @@
   
   .note-title {
       font-size: 0.8em;
+  }
+
+  /* Settings tab: prevent textarea resizing (Obsidian loads styles.css for the plugin) */
+  :global(.setting-item textarea) {
+    resize: none;
   }
 </style>

@@ -1,4 +1,4 @@
 declare module '*.svelte' {
-    import { SvelteComponentTyped } from 'svelte';
-    export default class extends SvelteComponentTyped { }
+    import { SvelteComponent } from 'svelte';
+    export default class extends SvelteComponent { }
 }

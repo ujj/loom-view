@@ -38,10 +38,12 @@ export const DEFAULT_SETTINGS: LoomViewSettings = {
 class LoomView extends ItemView {
     component?: LoomViewComponent;
     settings: LoomViewSettings;
+    plugin: LoomViewPlugin;
 
-    constructor(leaf: import('obsidian').WorkspaceLeaf, settings: LoomViewSettings) {
+    constructor(leaf: import('obsidian').WorkspaceLeaf, settings: LoomViewSettings, plugin: LoomViewPlugin) {
         super(leaf);
         this.settings = settings;
+        this.plugin = plugin;
     }
 
     getViewType() {
@@ -52,61 +54,61 @@ class LoomView extends ItemView {
         return 'Loom';
     }
 
-    async onOpen() {
+    onOpen(): Promise<void> {
         this.component = new LoomViewComponent({
             target: this.contentEl,
             props: {
                 app: this.app,
                 settings: this.settings,
                 saveVisibleLanes: async (lanes: string[]) => {
-                    const plugin = (this.app as any).plugins?.plugins?.['loom-view'];
-                    if (plugin) {
-                        plugin.settings.visibleLanes = lanes;
-                        await plugin.saveSettings();
-                    }
+                    this.plugin.settings.visibleLanes = lanes;
+                    await this.plugin.saveSettings();
                 }
             }
         });
+        return Promise.resolve();
     }
 
-    async onClose() {
+    onClose(): Promise<void> {
         if (this.component) {
             this.component.$destroy();
         }
+        return Promise.resolve();
     }
 }
 
 export default class LoomViewPlugin extends Plugin {
     settings: LoomViewSettings = DEFAULT_SETTINGS;
 
-    async onload() {
-        await this.loadSettings();
+    onload() {
+        void this.loadSettings().then(() => {
+            this.addSettingTab(new LoomViewSettingsTab(this.app, this));
 
-        this.addSettingTab(new LoomViewSettingsTab(this.app, this));
+            this.registerView(
+                LOOM_VIEW_TYPE,
+                (leaf) => new LoomView(leaf, this.settings, this)
+            );
 
-        this.registerView(
-            LOOM_VIEW_TYPE,
-            (leaf) => new LoomView(leaf, this.settings)
-        );
+            this.addRibbonIcon('git-branch-plus', 'Open view', () => {
+                void this.activateView();
+            });
 
-        this.addRibbonIcon('git-branch-plus', 'Open Loom View', () => {
-            this.activateView();
-        });
-
-        this.addCommand({
-            id: 'open-loom-view',
-            name: 'Open Loom View',
-            callback: () => {
-                this.activateView();
-            }
+            this.addCommand({
+                id: 'open-view',
+                name: 'Open view',
+                callback: () => {
+                    void this.activateView();
+                }
+            });
         });
     }
 
-    async onunload() {
+    onunload() {
     }
 
     async loadSettings() {
-        this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+        const data = (await this.loadData()) as Partial<LoomViewSettings> | null;
+        this.settings = Object.assign({}, DEFAULT_SETTINGS, data ?? {});
     }
 
     async saveSettings() {
@@ -114,7 +116,7 @@ export default class LoomViewPlugin extends Plugin {
         // Update settings in all open views
         const leaves = this.app.workspace.getLeavesOfType(LOOM_VIEW_TYPE);
         for (const leaf of leaves) {
-            const view = leaf.view as LoomView;
+            const view = leaf.view as unknown as LoomView;
             if (view && view.component) {
                 view.settings = this.settings;
                 view.component.$set({ settings: this.settings });
@@ -131,9 +133,8 @@ export default class LoomViewPlugin extends Plugin {
                 type: LOOM_VIEW_TYPE,
                 active: true,
             });
-            this.app.workspace.revealLeaf(
-                this.app.workspace.getLeavesOfType(LOOM_VIEW_TYPE)[0]
-            );
+            const loomLeaf = this.app.workspace.getLeavesOfType(LOOM_VIEW_TYPE)[0];
+            if (loomLeaf) void this.app.workspace.revealLeaf(loomLeaf);
         }
     }
 }
@@ -151,20 +152,13 @@ class LoomViewSettingsTab extends PluginSettingTab {
 
         containerEl.empty();
 
-        // Add CSS to prevent textarea resizing
-        containerEl.createEl('style', { 
-            text: '.setting-item textarea { resize: none; }' 
-        });
-
-        containerEl.createEl('h2', { text: 'Loom View Settings' });
-
-        containerEl.createEl('h3', { text: 'Data Scope' });
+        new Setting(containerEl).setName('Data scope').setHeading();
 
         new Setting(containerEl)
-            .setName('Source Folders')
-            .setDesc('Comma-separated folder paths to include. Supports wildcards (e.g., "History/*" matches all History subfolders, "History/Ancient, Projects/*"). Leave empty to include all folders.')
+            .setName('Source folders')
+            .setDesc('Comma-separated folder paths to include. Supports wildcards (e.g. "history/*" matches all history subfolders, "history/ancient, projects/*"). Leave empty to include all folders.')
             .addText(text => text
-                .setPlaceholder('History/*, Projects/Timeline')
+                .setPlaceholder('History/*, projects/timeline')
                 .setValue(this.plugin.settings.sourceFolders)
                 .onChange(async (value) => {
                     this.plugin.settings.sourceFolders = value;
@@ -172,10 +166,10 @@ class LoomViewSettingsTab extends PluginSettingTab {
                 }));
 
         new Setting(containerEl)
-            .setName('Required Tags')
-            .setDesc('Comma-separated tags to filter by. Follows Obsidian tag search: "History" matches "#History" and all nested like "#History/India". Use "History/" to match only nested children. Examples: "#ancient, History, #empire". Leave empty to include all tags.')
+            .setName('Required tags')
+            .setDesc('Comma-separated tags to filter by. Follows Obsidian tag search: "history" matches "#history" and all nested like "#history/india". Use "history/" to match only nested children. Examples: "#ancient, history, #empire". Leave empty to include all tags.')
             .addText(text => text
-                .setPlaceholder('#ancient, History, #empire')
+                .setPlaceholder('#ancient, history, #empire')
                 .setValue(this.plugin.settings.requiredTags)
                 .onChange(async (value) => {
                     this.plugin.settings.requiredTags = value;
@@ -183,24 +177,24 @@ class LoomViewSettingsTab extends PluginSettingTab {
                 }));
 
         new Setting(containerEl)
-            .setName('Scope Operator')
+            .setName('Scope operator')
             .setDesc('How to combine folder and tag filters')
             .addDropdown(dropdown => dropdown
-                .addOption('OR', 'Match Any (OR)')
-                .addOption('AND', 'Match All (AND)')
+                .addOption('OR', 'Match any (or)')
+                .addOption('AND', 'Match all (and)')
                 .setValue(this.plugin.settings.scopeOperator)
                 .onChange(async (value) => {
                     this.plugin.settings.scopeOperator = value as 'AND' | 'OR';
                     await this.plugin.saveSettings();
                 }));
 
-        containerEl.createEl('h3', { text: 'View Settings' });
+        new Setting(containerEl).setName('View').setHeading();
 
         new Setting(containerEl)
-            .setName('Start Date Key')
-            .setDesc('Frontmatter key for the start date (e.g., "year-start")')
+            .setName('Start date key')
+            .setDesc('Frontmatter key for the start date (e.g. "year-start").')
             .addText(text => text
-                .setPlaceholder('year-start')
+                .setPlaceholder('Year-start')
                 .setValue(this.plugin.settings.startDateKey)
                 .onChange(async (value) => {
                     this.plugin.settings.startDateKey = value;
@@ -208,10 +202,10 @@ class LoomViewSettingsTab extends PluginSettingTab {
                 }));
 
         new Setting(containerEl)
-            .setName('End Date Key')
-            .setDesc('Frontmatter key for the end date (e.g., "year-end")')
+            .setName('End date key')
+            .setDesc('Frontmatter key for the end date (e.g. "year-end").')
             .addText(text => text
-                .setPlaceholder('year-end')
+                .setPlaceholder('Year-end')
                 .setValue(this.plugin.settings.endDateKey)
                 .onChange(async (value) => {
                     this.plugin.settings.endDateKey = value;
@@ -219,8 +213,8 @@ class LoomViewSettingsTab extends PluginSettingTab {
                 }));
 
         new Setting(containerEl)
-            .setName('Date Format')
-            .setDesc('Specify the format for parsing dates (e.g., "yyyy-MM-dd", "MM/dd/yyyy", "dd/MM/yyyy"). Uses date-fns format tokens.')
+            .setName('Date format')
+            .setDesc('Specify the format for parsing dates (e.g. "yyyy-MM-dd", "MM/dd/yyyy", "dd/MM/yyyy"). Uses date-fns format tokens.')
             .addText(text => text
                 .setPlaceholder('yyyy-MM-dd')
                 .setValue(this.plugin.settings.dateFormat)
@@ -230,10 +224,10 @@ class LoomViewSettingsTab extends PluginSettingTab {
                 }));
 
         new Setting(containerEl)
-            .setName('Lane Key')
-            .setDesc('Frontmatter key used to group notes into lanes (e.g., "region")')
+            .setName('Lane key')
+            .setDesc('Frontmatter key used to group notes into lanes (e.g. "region").')
             .addText(text => text
-                .setPlaceholder('region')
+                .setPlaceholder('Region')
                 .setValue(this.plugin.settings.laneKey)
                 .onChange(async (value) => {
                     this.plugin.settings.laneKey = value;
@@ -241,10 +235,10 @@ class LoomViewSettingsTab extends PluginSettingTab {
                 }));
 
         new Setting(containerEl)
-            .setName('Lane Order')
-            .setDesc('Comma-separated list defining the order of lanes (e.g., "Americas, Europe, South-Asia")')
+            .setName('Lane order')
+            .setDesc('Comma-separated list defining the order of lanes (e.g. "americas, europe, south-asia").')
             .addTextArea(text => text
-                .setPlaceholder('Americas, Europe, South-Asia')
+                .setPlaceholder('Americas, europe, south-asia')
                 .setValue(this.plugin.settings.laneOrder)
                 .onChange(async (value) => {
                     this.plugin.settings.laneOrder = value;
@@ -252,8 +246,8 @@ class LoomViewSettingsTab extends PluginSettingTab {
                 }));
 
         new Setting(containerEl)
-            .setName('Show Uncategorized')
-            .setDesc('Show an "Others" lane for notes with lane values not in the lane order list')
+            .setName('Show uncategorized')
+            .setDesc('Show an "others" lane for notes with lane values not in the lane order list')
             .addToggle(toggle => toggle
                 .setValue(this.plugin.settings.showUncategorized)
                 .onChange(async (value) => {
@@ -262,10 +256,10 @@ class LoomViewSettingsTab extends PluginSettingTab {
                 }));
 
         new Setting(containerEl)
-            .setName('Connection Keys')
-            .setDesc('Comma-separated list of frontmatter keys to check for entity glow connections (e.g., "key-figures, mentors")')
+            .setName('Connection keys')
+            .setDesc('Comma-separated list of frontmatter keys to check for entity glow connections (e.g. "key-figures, mentors").')
             .addText(text => text
-                .setPlaceholder('key-figures')
+                .setPlaceholder('Key-figures')
                 .setValue(this.plugin.settings.connectionKeys)
                 .onChange(async (value) => {
                     this.plugin.settings.connectionKeys = value;
@@ -273,8 +267,8 @@ class LoomViewSettingsTab extends PluginSettingTab {
                 }));
 
         new Setting(containerEl)
-            .setName('Zoom Levels')
-            .setDesc('Comma-separated list of integers defining zoom granularities (e.g., "1, 10, 100" for Year, Decade, Century)')
+            .setName('Zoom levels')
+            .setDesc('Comma-separated list of integers defining zoom granularities (e.g. "1, 10, 100" for year, decade, century).')
             .addText(text => text
                 .setPlaceholder('1, 10, 100')
                 .setValue(this.plugin.settings.zoomLevels)
@@ -284,10 +278,10 @@ class LoomViewSettingsTab extends PluginSettingTab {
                 }));
 
         new Setting(containerEl)
-            .setName('Era Bookmarks')
-            .setDesc('Bookmarks for quick navigation (one per line). Year mode: "Label: Year" (e.g. Bronze: -3000). Date mode: "Label: Date" (e.g. Week 1: 2026-01-01). Uses Date Format setting for parsing dates.')
+            .setName('Era bookmarks')
+            .setDesc('Bookmarks for quick navigation (one per line). Year mode: "label: year" (e.g. Bronze: -3000). Date mode: "label: date" (e.g. Week 1: 2026-01-01). Uses date format setting for parsing dates.')
             .addTextArea(text => text
-                .setPlaceholder('Bronze: -3000\nIron: -1200\nClassical: -500')
+                .setPlaceholder('Bronze: -3000\niron: -1200\nclassical: -500')
                 .setValue(this.plugin.settings.eraBookmarks)
                 .onChange(async (value) => {
                     this.plugin.settings.eraBookmarks = value;
